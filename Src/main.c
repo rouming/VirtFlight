@@ -24,7 +24,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "usbd_hid.h"
+#include "stm32_hal_legacy.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +46,7 @@
 TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
+extern USBD_HandleTypeDef hUsbDeviceFS;
 
 /* USER CODE END PV */
 
@@ -58,6 +60,50 @@ static void MX_TIM3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static struct channel {
+	uint16_t     pin;
+	GPIO_TypeDef *port;
+	uint16_t     cnt;
+	uint16_t     width;
+} channels[6] = {
+	[0] = { .pin = CH1_Pin, .port = CH1_GPIO_Port, },
+	[1] = { .pin = CH2_Pin, .port = CH2_GPIO_Port, },
+	[2] = { .pin = CH3_Pin, .port = CH3_GPIO_Port, },
+	[3] = { .pin = CH4_Pin, .port = CH4_GPIO_Port, },
+	[4] = { .pin = CH5_Pin, .port = CH5_GPIO_Port, },
+	[5] = { .pin = CH6_Pin, .port = CH6_GPIO_Port, },
+};
+
+static struct channel *channel_by_gpio_pin(uint16_t GPIO_Pin)
+{
+	struct channel *ch;
+	int i;
+
+	for (i = 0; i < sizeof(channels)/sizeof(channels[0]); i++) {
+		ch = &channels[i];
+
+		if (ch->pin == GPIO_Pin)
+			return ch;
+	}
+
+	Error_Handler();
+
+	return NULL;
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	struct channel *ch;
+
+	ch = channel_by_gpio_pin(GPIO_Pin);
+
+	if (HAL_GPIO_ReadPin(ch->port, ch->pin)) {
+		ch->cnt = __HAL_TIM_GetCounter(&htim3);
+	} else {
+		ch->width = __HAL_TIM_GetCounter(&htim3) - ch->cnt;
+	}
+}
 
 /* USER CODE END 0 */
 
@@ -94,6 +140,9 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
+  if (HAL_TIM_Base_Start(&htim3))
+	  Error_Handler();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -103,6 +152,34 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  struct report {
+		  uint16_t axis[6];
+		  uint8_t  buttons:3;
+		  uint8_t  padding:5;
+	  } __attribute__((packed));
+
+	  struct report data;
+	  int i;
+
+	  memset(&data, 0, sizeof(data));
+	  for (i = 0; i < sizeof(channels)/sizeof(channels[0]); i++) {
+		  struct channel *ch = &channels[i];
+		  uint16_t width;
+
+		  width = ch->width;
+		  if (width) {
+			  /* Map to HID report 4096 value */
+			  if (width < 3500) {
+				  data.axis[i] = 0;
+			  } else {
+				  data.axis[i] = (width - 3500) & 4095;
+			  }
+		  }
+	  }
+
+	  USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&data,
+						  sizeof(data));
+	  HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
