@@ -317,11 +317,16 @@ __ALIGN_BEGIN static uint8_t USBD_HID_DeviceQualifierDesc[USB_LEN_DEV_QUALIFIER_
 
 __ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE]  __ALIGN_END =
 {
+/*
+ * Joystick
+ */
+
     0x05, 0x01,       //  Usage Page (Generic Desktop)
     0x09, 0x04,       //  Usage (Joystick)
     0xa1, 0x01,       //  Collection (Application)
     0x09, 0x01,       //    Usage (Pointer)
     0xA1, 0x00,       //    Collection (Physical)
+    0x85, HID_JOYSTICK_REPORT_ID, //   Report ID
 
     /*
      * Declare 6-axis
@@ -365,6 +370,63 @@ __ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE]  _
     0x81, 0x03,       //      Item
 
     0xC0,             //    End Collection
+
+/*
+ * Keyboard
+ */
+
+    0x05, 0x01,       //    Usage Page (Generic Desktop),
+    0x09, 0x06,       //    Usage (Keyboard),
+    0xA1, 0x01,       //    Collection (Application),
+    0x85, HID_KEYBOARD_REPORT_ID, // Report ID
+
+    /* Modifier key */
+
+    0x75, 0x01,       //      Report Size (1),
+    0x95, 0x08,       //      Report Count (8),
+    0x05, 0x07,       //      Usage Page (Key Codes),
+    0x19, 0xE0,       //      Usage Minimum (224),
+    0x29, 0xE7,       //      Usage Maximum (231),
+    0x15, 0x00,       //      Logical Minimum (0),
+    0x25, 0x01,       //      Logical Maximum (1),
+    0x81, 0x02,       //      Input (Data, Variable, Absolute),
+
+    /* Reserved OEM byte */
+
+    0x95, 0x01,       //      Report Count (1),
+    0x75, 0x08,       //      Report Size (8),
+    0x81, 0x03,       //      Input (Constant),
+
+
+#if 0
+    /* LED output */
+
+    0x95, 0x05,       //      Report Count (5),
+    0x75, 0x01,       //      Report Size (1),
+    0x05, 0x08,       //      Usage Page (LEDs),
+    0x19, 0x01,       //      Usage Minimum (1),
+    0x29, 0x05,       //      Usage Maximum (5),
+    0x91, 0x02,       //      Output (Data, Variable, Absolute),
+
+    /* LED output padding */
+
+    0x95, 0x01,       //      Report Count (1),
+    0x75, 0x03,       //      Report Size (3),
+    0x91, 0x03,       //      Output (Constant)
+#endif
+
+    0x95, 0x06,       //      Report Count (6),
+    0x75, 0x08,       //      Report Size (8),
+
+    0x15, 0x00,       //      Logical Minimum (0),
+    0x25, 0x68,       //      Logical Maximum(104),
+    0x05, 0x07,       //      Usage Page (Key Codes),
+    0x19, 0x00,       //      Usage Minimum (0),
+    0x29, 0x68,       //      Usage Maximum (104),
+
+    0x81, 0x00,       //      Input (Data, Array),
+    0xc0,             //    End Collection
+
     0xC0,             //  End Collection
 };
 

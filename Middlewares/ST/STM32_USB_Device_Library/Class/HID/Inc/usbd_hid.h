@@ -41,14 +41,18 @@ extern "C" {
 /** @defgroup USBD_HID_Exported_Defines
   * @{
   */
+
+#define HID_JOYSTICK_REPORT_ID        1
+#define HID_KEYBOARD_REPORT_ID        2
+
 #define HID_EPIN_ADDR                 0x81U
 
-/*  16-bit axis x6 + 8-bit for button */
-#define HID_EPIN_SIZE                 13U
+/*  report_id + 16-bit axis x6 + 8-bit for button */
+#define HID_EPIN_SIZE                 14U
 
 #define USB_HID_CONFIG_DESC_SIZ       34U
 #define USB_HID_DESC_SIZ              9U
-#define HID_MOUSE_REPORT_DESC_SIZE    59U
+#define HID_MOUSE_REPORT_DESC_SIZE    108U
 
 #define HID_DESCRIPTOR_TYPE           0x21U
 #define HID_REPORT_DESC               0x22U

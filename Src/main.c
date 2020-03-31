@@ -101,8 +101,109 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 	if (HAL_GPIO_ReadPin(ch->port, ch->pin)) {
 		ch->cnt = __HAL_TIM_GetCounter(&htim3);
 	} else {
-		ch->width = __HAL_TIM_GetCounter(&htim3) - ch->cnt;
+		uint16_t width =__HAL_TIM_GetCounter(&htim3) - ch->cnt;
+
+		/* Clamp to [0, 4095] */
+		if (width < 3500)
+			width = 0;
+		else {
+			width -= 3500;
+			width &= 4095;
+		}
+
+		ch->width = width;
 	}
+}
+
+static void USBD_HID_WaitForSend(USBD_HandleTypeDef *dev)
+{
+	volatile USBD_HID_HandleTypeDef *hhid =
+		(volatile USBD_HID_HandleTypeDef *)dev->pClassData;
+
+	while (hhid->state == HID_BUSY)
+		;
+}
+
+struct joystick_report {
+	uint8_t  report_id;
+	uint16_t axis[6];
+	uint8_t  buttons:3;
+	uint8_t  padding:5;
+} __attribute__((packed));
+
+static void Send_JoystickReport(void)
+{
+	  struct joystick_report joystick = {
+		  .report_id = HID_JOYSTICK_REPORT_ID
+	  };
+	  int i;
+
+	  for (i = 0; i < sizeof(channels)/sizeof(channels[0]); i++)
+		  joystick.axis[i] = channels[i].width;
+
+	  USBD_HID_WaitForSend(&hUsbDeviceFS);
+	  USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&joystick,
+						  sizeof(joystick));
+}
+
+struct keyboard_report {
+	uint8_t report_id;
+	uint8_t keys[8];
+};
+
+static void Handle_Key(struct channel *ch, uint8_t *sent,
+					   uint8_t keycode)
+{
+	if (ch->width >= 1500 && !*sent) {
+		struct keyboard_report keyboard = {
+			.report_id = HID_KEYBOARD_REPORT_ID
+		};
+
+		/* Press a key */
+		keyboard.keys[2] = keycode;
+
+		USBD_HID_WaitForSend(&hUsbDeviceFS);
+		USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&keyboard,
+							sizeof(keyboard));
+
+		/* Release a key */
+		keyboard.keys[2] = 0x00;
+
+		USBD_HID_WaitForSend(&hUsbDeviceFS);
+		USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&keyboard,
+							sizeof(keyboard));
+
+		*sent = 1;
+
+	} else if (ch->width < 1500 && *sent) {
+		*sent = 0;
+	}
+}
+
+/*
+ * We map 5'th channel for 't' key
+ */
+static void Handle_T_Key(void)
+{
+	static uint8_t t_sent;
+
+	Handle_Key(&channels[4], &t_sent, 0x17);
+}
+
+/*
+ * We map 6'th channel for 'r' key
+ */
+static void Handle_R_Key(void)
+{
+	static uint8_t r_sent;
+
+	Handle_Key(&channels[5], &r_sent, 0x15);
+}
+
+static void Send_KeyboardReport(void)
+{
+	Handle_R_Key();
+	Handle_T_Key();
 }
 
 /* USER CODE END 0 */
@@ -152,33 +253,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  struct report {
-		  uint16_t axis[6];
-		  uint8_t  buttons:3;
-		  uint8_t  padding:5;
-	  } __attribute__((packed));
+	  Send_JoystickReport();
+	  Send_KeyboardReport();
 
-	  struct report data;
-	  int i;
-
-	  memset(&data, 0, sizeof(data));
-	  for (i = 0; i < sizeof(channels)/sizeof(channels[0]); i++) {
-		  struct channel *ch = &channels[i];
-		  uint16_t width;
-
-		  width = ch->width;
-		  if (width) {
-			  /* Map to HID report 4096 value */
-			  if (width < 3500) {
-				  data.axis[i] = 0;
-			  } else {
-				  data.axis[i] = (width - 3500) & 4095;
-			  }
-		  }
-	  }
-
-	  USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&data,
-						  sizeof(data));
 	  HAL_Delay(10);
   }
   /* USER CODE END 3 */
