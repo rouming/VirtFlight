@@ -340,7 +340,7 @@ __ALIGN_BEGIN static uint8_t HID_MOUSE_ReportDesc[HID_MOUSE_REPORT_DESC_SIZE]  _
     0x09, 0x34,       //      Usage (Ry)
     0x09, 0x35,       //      Usage (Rz)
     0x15, 0x00,       //      Logical minimum (0)
-    0x26, 0x00, 0x10, //      Logical maximum (4096)
+    0x26, 0xff, 0x0f, //      Logical maximum (4095)
     0x75, 0x10,       //      Report size (16)
     0x95, 0x06,       //      Report count (6)
     0x81, 0x02,       //      Item
