@@ -43,6 +43,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
@@ -54,6 +55,7 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -61,57 +63,228 @@ static void MX_TIM3_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-static struct channel {
-	uint16_t     pin;
-	GPIO_TypeDef *port;
-	uint16_t     cnt;
-	uint16_t     width;
-} channels[6] = {
-	[0] = { .pin = CH1_Pin, .port = CH1_GPIO_Port, },
-	[1] = { .pin = CH2_Pin, .port = CH2_GPIO_Port, },
-	[2] = { .pin = CH3_Pin, .port = CH3_GPIO_Port, },
-	[3] = { .pin = CH4_Pin, .port = CH4_GPIO_Port, },
-	[4] = { .pin = CH5_Pin, .port = CH5_GPIO_Port, },
-	[5] = { .pin = CH6_Pin, .port = CH6_GPIO_Port, },
+struct channel {
+	uint16_t       width;
 };
 
-static struct channel *channel_by_gpio_pin(uint16_t GPIO_Pin)
+struct pwm {
+	uint16_t       pin;
+	GPIO_TypeDef   *port;
+	struct channel *channel;
+	uint16_t       rising_cnt;
+};
+
+enum ppm_state {
+	PPM_SYNCING_INIT, /* Waits for the first falling or rising edge */
+	PPM_SYNCING,      /* Waits for long delay between impulses */
+	PPM_COUNTING,     /* Counts channels */
+	PPM_READY         /* PPM ready */
+};
+
+enum {
+	PPM_IDLE_MS = 4,  /* Pause between PPM frames */
+	NO_INPUT_MS = 20, /* If transmitter is off */
+};
+
+struct ppm {
+	uint16_t       pin;
+	GPIO_TypeDef   *port;
+	struct channel *channels;
+	unsigned int   nr_channels;
+	unsigned int   nr_edges;
+
+	enum ppm_state state;
+	uint16_t       edge_ms;
+	uint16_t       edge_cnt;
+};
+
+enum input_state {
+	PROBING,
+	PPM_INPUT,
+	PWM_INPUT,
+	UNKNOWN_INPUT,
+};
+
+struct input {
+	enum input_state state;
+	struct pwm       pwm_pins[6];
+	struct ppm       ppm_pin;
+	uint16_t         last_input_ms;
+};
+
+static struct channel channels[6];
+
+static struct input input = {
+	.state = PROBING,
+	.pwm_pins = {
+		[0] = {.pin = CH1_Pin, .port = CH1_GPIO_Port, .channel = &channels[0]},
+		[1] = {.pin = CH2_Pin, .port = CH2_GPIO_Port, .channel = &channels[1]},
+		[2] = {.pin = CH3_Pin, .port = CH3_GPIO_Port, .channel = &channels[2]},
+		[3] = {.pin = CH4_Pin, .port = CH4_GPIO_Port, .channel = &channels[3]},
+		[4] = {.pin = CH5_Pin, .port = CH5_GPIO_Port, .channel = &channels[4]},
+		[5] = {.pin = CH6_Pin, .port = CH6_GPIO_Port, .channel = &channels[5]},
+	},
+	.ppm_pin = {
+		.pin          = CH1_Pin,
+		.port         = CH1_GPIO_Port,
+		.channels     = channels,
+		.nr_channels = sizeof(channels)/sizeof(channels[0]),
+	},
+};
+
+static inline void set_channel_width(struct channel *ch, uint16_t width)
 {
-	struct channel *ch;
-	int i;
-
-	for (i = 0; i < sizeof(channels)/sizeof(channels[0]); i++) {
-		ch = &channels[i];
-
-		if (ch->pin == GPIO_Pin)
-			return ch;
+	/* Clamp to [0, 4095] */
+	if (width < 3900) {
+		width = 0;
+	} else {
+		width -= 3900;
+		if (width > 4095)
+			width = 4095;
 	}
 
-	Error_Handler();
-
-	return NULL;
+	ch->width = width;
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+static void handle_pwm_input(uint16_t pin)
 {
-	struct channel *ch;
+	uint16_t cnt;
+	int i;
 
-	ch = channel_by_gpio_pin(GPIO_Pin);
+	cnt = __HAL_TIM_GetCounter(&htim3);
 
-	if (HAL_GPIO_ReadPin(ch->port, ch->pin)) {
-		ch->cnt = __HAL_TIM_GetCounter(&htim3);
-	} else {
-		uint16_t width =__HAL_TIM_GetCounter(&htim3) - ch->cnt;
+	for (i = 0; i < sizeof(input.pwm_pins)/sizeof(input.pwm_pins[0]); i++) {
+		struct pwm *pwm = &input.pwm_pins[i];
 
-		/* Clamp to [0, 4095] */
-		if (width < 3900)
-			width = 0;
-		else {
-			width -= 3900;
-			width &= 4095;
+		if (pwm->pin != pin)
+			continue;
+
+		if (HAL_GPIO_ReadPin(pwm->port, pwm->pin)) {
+			pwm->rising_cnt = cnt;
+		} else {
+			/* Update channel */
+			uint16_t width = cnt - pwm->rising_cnt;
+			set_channel_width(pwm->channel, width);
 		}
+	}
+}
 
-		ch->width = width;
+static void handle_ppm_input(uint16_t pin)
+{
+	struct ppm *ppm = &input.ppm_pin;
+	uint16_t diff_ms, cnt, ms;
+
+	if (ppm->pin != pin)
+		/* Not a PPM pin, just ignore */
+		return;
+
+	ms = __HAL_TIM_GetCounter(&htim2);
+	cnt = __HAL_TIM_GetCounter(&htim3);
+
+	switch (ppm->state) {
+	case PPM_SYNCING_INIT:
+		ppm->edge_ms = ms;
+		ppm->state = PPM_SYNCING;
+		break;
+	case PPM_SYNCING:
+		diff_ms = ms - ppm->edge_ms;
+		ppm->edge_ms = ms;
+
+		if (diff_ms < PPM_IDLE_MS)
+			break;
+
+		/* Got long enough idle, now count channels */
+		ppm->nr_edges = 0;
+		ppm->state = PPM_COUNTING;
+		break;
+	case PPM_COUNTING:
+		diff_ms = ms - ppm->edge_ms;
+		ppm->edge_ms = ms;
+		ppm->nr_edges += 1;
+
+		if (diff_ms < PPM_IDLE_MS)
+			break;
+
+		/* Got long enough idle, now decide what input we have */
+
+		if (ppm->nr_edges & 1) {
+			/* Can't be odd for any input */
+			input.state = UNKNOWN_INPUT;
+			ppm->state = PPM_SYNCING_INIT;
+			break;
+		}
+		if (ppm->nr_edges == 2) {
+			input.state = PWM_INPUT;
+			ppm->state = PPM_SYNCING_INIT;
+			break;
+		}
+		input.state = PPM_INPUT;
+		ppm->state = PPM_READY;
+		ppm->nr_edges = 0;
+		ppm->edge_cnt = cnt;
+		break;
+
+	case PPM_READY:
+		diff_ms = ms - ppm->edge_ms;
+		ppm->edge_ms = ms;
+		ppm->nr_edges += 1;
+
+		if (diff_ms >= PPM_IDLE_MS) {
+			ppm->nr_edges = 0;
+			ppm->edge_cnt = cnt;
+			break;
+		}
+		if (ppm->nr_edges % 2) {
+			int i_ch = (ppm->nr_edges / 2) - 1;
+			if (i_ch < ppm->nr_channels) {
+				uint16_t width = cnt - ppm->edge_cnt;
+				set_channel_width(&ppm->channels[i_ch], width);
+			}
+			ppm->edge_cnt = cnt;
+			break;
+		}
+		break;
+
+	default:
+		Error_Handler();
+		break;
+	}
+}
+
+static void reset_input_to_probing(void)
+{
+	input.state = PROBING;
+	input.ppm_pin.state = PPM_SYNCING_INIT;
+};
+
+static void check_no_input(void)
+{
+	uint16_t cnt_ms = __HAL_TIM_GetCounter(&htim2);
+
+	/* Switch back to PROBING if no input has happened */
+	if (input.state != PROBING) {
+		uint16_t diff_ms = cnt_ms - input.last_input_ms;
+		if (diff_ms >= NO_INPUT_MS)
+			reset_input_to_probing();
+	}
+	input.last_input_ms = cnt_ms;
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t pin)
+{
+	check_no_input();
+
+	switch (input.state) {
+	case PROBING:
+	case PPM_INPUT:
+		handle_ppm_input(pin);
+		break;
+	case PWM_INPUT:
+		handle_pwm_input(pin);
+		break;
+	default:
+		Error_Handler();
+		break;
 	}
 }
 
@@ -206,6 +379,69 @@ static void Send_KeyboardReport(void)
 	Handle_T_Key();
 }
 
+static void Status_Blink(void)
+{
+	static uint16_t prev_ms;
+	static int init;
+
+	uint16_t ms, diff_ms;
+
+	if (!init) {
+		prev_ms = __HAL_TIM_GetCounter(&htim2);
+		init = 1;
+	}
+	ms = __HAL_TIM_GetCounter(&htim2);
+	diff_ms = ms - prev_ms;
+
+	if (input.state == PROBING) {
+		/* 0.2s on, 0.2s off */
+
+		if (diff_ms >= 200) {
+			HAL_GPIO_TogglePin(BP_LED_GPIO_Port, BP_LED_Pin);
+			prev_ms = ms;
+		}
+
+	} else if (input.state == PWM_INPUT) {
+		/* 1s on, 1s off */
+
+		if (diff_ms >= 1000) {
+			HAL_GPIO_TogglePin(BP_LED_GPIO_Port, BP_LED_Pin);
+			prev_ms = ms;
+		}
+	} else if (input.state == PPM_INPUT) {
+		/* 1s off, 0.2s on, 0.2s off, 0.2s on */
+
+		static int state;
+
+		if (!state) {
+			/* 1s off */
+			HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_SET);
+			state = 1;
+		} else if (state == 1 && diff_ms >= 1000) {
+			/* 0.2s on */
+			HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_RESET);
+			prev_ms = ms;
+			state = 2;
+		} else if (state == 2 && diff_ms >= 200) {
+			/* 0.2s off */
+			HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_SET);
+			prev_ms = ms;
+			state = 3;
+		} else if (state == 3 && diff_ms >= 200) {
+			/* 0.2s on */
+			HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_RESET);
+			prev_ms = ms;
+			state = 4;
+		} else if (state == 4 && diff_ms >= 200) {
+			/* repeat */
+			state = 0;
+			prev_ms = ms;
+		}
+	} else {
+		Error_Handler();
+	}
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -239,15 +475,23 @@ int main(void)
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   MX_TIM3_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
   if (HAL_TIM_Base_Start(&htim3))
+	  Error_Handler();
+
+  if (HAL_TIM_Base_Start_IT(&htim2))
 	  Error_Handler();
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
+  /* Turn led off */
+  HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_SET);
+
   while (1)
   {
     /* USER CODE END WHILE */
@@ -255,7 +499,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
 	  Send_JoystickReport();
 	  Send_KeyboardReport();
-
+	  Status_Blink();
 	  HAL_Delay(10);
   }
   /* USER CODE END 3 */
@@ -303,6 +547,51 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 47999;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 0xffff;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
 }
 
 /**
@@ -414,8 +703,11 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-
+	while (1) {
+		/* Fast blinking means error */
+		HAL_GPIO_TogglePin(BP_LED_GPIO_Port, BP_LED_Pin);
+		HAL_Delay(70);
+	}
   /* USER CODE END Error_Handler_Debug */
 }
 

@@ -11,12 +11,14 @@ do RESET or do TURTLE in "Liftoff" quad simulator.
 * 6 axis joystick
 * Mapping of 5'th and 6'th channel to 'r' and 't' keys to support
   Liftoff key commands
-* PWM
+* PWM - if detected makes 1 long blink in a second with a green status led
+* PPM - if detected makes 2 short blinks in a second with a green status led
 
 ## Pinout
 
 ![Alt text](https://i.imgur.com/ucgJGEs.jpg)
 
-6 PWM channels can be connected to A0-A5 pins on BluePill board.
+* 6 PWM channels can be connected to A0-A5 pins of the BluePill board.
+* PPM can be connected to the A0 pin of the BluePill board.
 
-PPM and IBUS are not yet implemented.
+IBUS is not yet implemented.
