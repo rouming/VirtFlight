@@ -84,6 +84,10 @@ enum ppm_state {
 enum {
 	PPM_IDLE_MS = 4,  /* Pause between PPM frames */
 	NO_INPUT_MS = 20, /* If transmitter is off */
+
+	NR_AXIS     = 10, /* How many axis joystick supports */
+	NR_CHANNELS = 10, /* How many channels do we handle */
+	NR_PWM_PINS = 6,  /* How many PWM pins do we have */
 };
 
 struct ppm {
@@ -107,12 +111,12 @@ enum input_state {
 
 struct input {
 	enum input_state state;
-	struct pwm       pwm_pins[6];
+	struct pwm       pwm_pins[NR_PWM_PINS];
 	struct ppm       ppm_pin;
 	uint16_t         last_input_ms;
 };
 
-static struct channel channels[6];
+static struct channel channels[NR_CHANNELS];
 
 static struct input input = {
 	.state = PROBING,
@@ -128,7 +132,7 @@ static struct input input = {
 		.pin          = CH1_Pin,
 		.port         = CH1_GPIO_Port,
 		.channels     = channels,
-		.nr_channels = sizeof(channels)/sizeof(channels[0]),
+		.nr_channels  = NR_CHANNELS,
 	},
 };
 
@@ -153,7 +157,7 @@ static void handle_pwm_input(uint16_t pin)
 
 	cnt = __HAL_TIM_GetCounter(&htim3);
 
-	for (i = 0; i < sizeof(input.pwm_pins)/sizeof(input.pwm_pins[0]); i++) {
+	for (i = 0; i < NR_PWM_PINS; i++) {
 		struct pwm *pwm = &input.pwm_pins[i];
 
 		if (pwm->pin != pin)
@@ -299,7 +303,7 @@ static void USBD_HID_WaitForSend(USBD_HandleTypeDef *dev)
 
 struct joystick_report {
 	uint8_t  report_id;
-	uint16_t axis[6];
+	uint16_t axis[NR_AXIS];
 	uint8_t  buttons:3;
 	uint8_t  padding:5;
 } __attribute__((packed));
@@ -309,9 +313,10 @@ static void Send_JoystickReport(void)
 	  struct joystick_report joystick = {
 		  .report_id = HID_JOYSTICK_REPORT_ID
 	  };
-	  int i;
+	  int i, nr;
 
-	  for (i = 0; i < sizeof(channels)/sizeof(channels[0]); i++)
+	  nr = NR_AXIS < NR_CHANNELS ? NR_AXIS : NR_CHANNELS;
+	  for (i = 0; i < nr; i++)
 		  joystick.axis[i] = channels[i].width;
 
 	  USBD_HID_WaitForSend(&hUsbDeviceFS);

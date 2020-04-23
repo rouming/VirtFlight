@@ -47,12 +47,12 @@ extern "C" {
 
 #define HID_EPIN_ADDR                 0x81U
 
-/*  report_id + 16-bit axis x6 + 8-bit for button */
-#define HID_EPIN_SIZE                 14U
+/*  8-bit report_id + 10x 16-bit axis + 8-bit for button */
+#define HID_EPIN_SIZE                 22U
 
 #define USB_HID_CONFIG_DESC_SIZ       34U
 #define USB_HID_DESC_SIZ              9U
-#define HID_MOUSE_REPORT_DESC_SIZE    108U
+#define HID_MOUSE_REPORT_DESC_SIZE    116U
 
 #define HID_DESCRIPTOR_TYPE           0x21U
 #define HID_REPORT_DESC               0x22U
