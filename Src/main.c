@@ -528,7 +528,8 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  Send_JoystickReport();
-	  Send_KeyboardReport();
+	  /* Send_KeyboardReport(); */
+	  (void)Send_KeyboardReport;
 	  Status_Blink();
 	  HAL_Delay(10);
   }
