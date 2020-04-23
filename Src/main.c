@@ -324,32 +324,49 @@ struct keyboard_report {
 	uint8_t keys[8];
 };
 
-static void Handle_Key(struct channel *ch, uint8_t *sent,
-					   uint8_t keycode)
+static void Send_Key(uint8_t keycode)
+{
+	struct keyboard_report keyboard = {
+		.report_id = HID_KEYBOARD_REPORT_ID
+	};
+
+	keyboard.keys[2] = keycode;
+
+	USBD_HID_WaitForSend(&hUsbDeviceFS);
+	USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&keyboard,
+						sizeof(keyboard));
+}
+
+static void PressAndRelease_Key(struct channel *ch, uint8_t *sent,
+								uint8_t keycode)
 {
 	if (ch->width >= 1500 && !*sent) {
-		struct keyboard_report keyboard = {
-			.report_id = HID_KEYBOARD_REPORT_ID
-		};
-
 		/* Press a key */
-		keyboard.keys[2] = keycode;
-
-		USBD_HID_WaitForSend(&hUsbDeviceFS);
-		USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&keyboard,
-							sizeof(keyboard));
-
+		Send_Key(keycode);
 		/* Release a key */
-		keyboard.keys[2] = 0x00;
-
-		USBD_HID_WaitForSend(&hUsbDeviceFS);
-		USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&keyboard,
-							sizeof(keyboard));
+		Send_Key(0x00);
 
 		*sent = 1;
 
 	} else if (ch->width < 1500 && *sent) {
 		*sent = 0;
+	}
+}
+
+static void PressOrRelease_Key(struct channel *ch, uint8_t *pressed,
+							   uint8_t keycode)
+{
+	if (ch->width >= 1500) {
+		/* Press a key many times */
+		Send_Key(keycode);
+
+		*pressed = 1;
+
+	} else if (ch->width < 1500 && *pressed) {
+		/* Release a key once */
+		Send_Key(0x00);
+
+		*pressed = 0;
 	}
 }
 
@@ -360,7 +377,17 @@ static void Handle_T_Key(void)
 {
 	static uint8_t t_sent;
 
-	Handle_Key(&channels[4], &t_sent, 0x17);
+	PressAndRelease_Key(&channels[4], &t_sent, 0x17);
+}
+
+/*
+ * We map 5'th channel for 'y' key
+ */
+static void Handle_Y_Key(void)
+{
+	static uint8_t y_pressed;
+
+	PressOrRelease_Key(&channels[4], &y_pressed, 0x1c);
 }
 
 /*
@@ -370,13 +397,16 @@ static void Handle_R_Key(void)
 {
 	static uint8_t r_sent;
 
-	Handle_Key(&channels[5], &r_sent, 0x15);
+	PressAndRelease_Key(&channels[5], &r_sent, 0x15);
 }
 
 static void Send_KeyboardReport(void)
 {
-	Handle_R_Key();
+	/* Either T, either Y */
 	Handle_T_Key();
+	(void)Handle_Y_Key;
+
+	Handle_R_Key();
 }
 
 static void Status_Blink(void)
