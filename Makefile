@@ -37,6 +37,7 @@ BUILD_DIR = build
 # C sources
 C_SOURCES =  \
 Src/main.c \
+Src/ibus.c \
 Src/usb_device.c \
 Src/usbd_conf.c \
 Src/usbd_desc.c \

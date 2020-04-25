@@ -26,6 +26,7 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_hid.h"
 #include "stm32_hal_legacy.h"
+#include "ibus.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -66,14 +67,12 @@ static void MX_USART1_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-struct channel {
-	uint16_t       width;
-};
+typedef uint16_t channel_t;
 
 struct pwm {
 	uint16_t       pin;
 	GPIO_TypeDef   *port;
-	struct channel *channel;
+	channel_t      *channel;
 	uint16_t       rising_cnt;
 };
 
@@ -96,7 +95,7 @@ enum {
 struct ppm {
 	uint16_t       pin;
 	GPIO_TypeDef   *port;
-	struct channel *channels;
+	channel_t      *channels;
 	unsigned int   nr_channels;
 	unsigned int   nr_edges;
 
@@ -109,6 +108,7 @@ enum input_state {
 	PROBING,
 	PPM_INPUT,
 	PWM_INPUT,
+	IBUS_INPUT,
 	UNKNOWN_INPUT,
 };
 
@@ -116,10 +116,11 @@ struct input {
 	enum input_state state;
 	struct pwm       pwm_pins[NR_PWM_PINS];
 	struct ppm       ppm_pin;
+	struct ibus      ibus;
 	uint16_t         last_input_ms;
 };
 
-static struct channel channels[NR_CHANNELS];
+static channel_t channels[NR_CHANNELS];
 
 static struct input input = {
 	.state = PROBING,
@@ -139,7 +140,7 @@ static struct input input = {
 	},
 };
 
-static inline void set_channel_width(struct channel *ch, uint16_t width)
+static inline void set_channel_width(channel_t *ch, uint16_t width)
 {
 	/* Clamp to [0, 4095] */
 	if (width < 3900) {
@@ -150,7 +151,7 @@ static inline void set_channel_width(struct channel *ch, uint16_t width)
 			width = 4095;
 	}
 
-	ch->width = width;
+	*ch = width;
 }
 
 static void handle_pwm_input(uint16_t pin)
@@ -290,7 +291,23 @@ void HAL_GPIO_EXTI_Callback(uint16_t pin)
 		handle_pwm_input(pin);
 		break;
 	default:
-		Error_Handler();
+		break;
+	}
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	check_no_input();
+
+	switch (input.state) {
+	case PROBING:
+		input.state = IBUS_INPUT;
+		ibus_init(&input.ibus, huart);
+		/* fallthrough */
+	case IBUS_INPUT:
+		handle_ibus_input(&input.ibus);
+		break;
+	default:
 		break;
 	}
 }
@@ -311,6 +328,25 @@ struct joystick_report {
 	uint8_t  padding:5;
 } __attribute__((packed));
 
+static void fill_channels_from_ibus(struct ibus *ibus,
+									channel_t *channels,
+									size_t nr)
+{
+	int i;
+
+	ibus_get_channels(ibus, channels, nr);
+
+	/* Normalize to [0, 4000] */
+	for (i = 0; i < nr; i++) {
+		channel_t ch = channels[i];
+
+		ch  = ch < 1000 ? 0 : ch - 1000;
+		ch *= 4;
+		ch  = ch > 4000 ? 4000 : ch;
+		channels[i] = ch;
+	}
+}
+
 static void Send_JoystickReport(void)
 {
 	  struct joystick_report joystick = {
@@ -318,9 +354,12 @@ static void Send_JoystickReport(void)
 	  };
 	  int i, nr;
 
+	  if (input.state == IBUS_INPUT)
+		  fill_channels_from_ibus(&input.ibus, channels, NR_CHANNELS);
+
 	  nr = NR_AXIS < NR_CHANNELS ? NR_AXIS : NR_CHANNELS;
 	  for (i = 0; i < nr; i++)
-		  joystick.axis[i] = channels[i].width;
+		  joystick.axis[i] = channels[i];
 
 	  USBD_HID_WaitForSend(&hUsbDeviceFS);
 	  USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*)&joystick,
@@ -345,10 +384,10 @@ static void Send_Key(uint8_t keycode)
 						sizeof(keyboard));
 }
 
-static void PressAndRelease_Key(struct channel *ch, uint8_t *sent,
+static void PressAndRelease_Key(channel_t *ch, uint8_t *sent,
 								uint8_t keycode)
 {
-	if (ch->width >= 1500 && !*sent) {
+	if (*ch >= 1500 && !*sent) {
 		/* Press a key */
 		Send_Key(keycode);
 		/* Release a key */
@@ -356,21 +395,21 @@ static void PressAndRelease_Key(struct channel *ch, uint8_t *sent,
 
 		*sent = 1;
 
-	} else if (ch->width < 1500 && *sent) {
+	} else if (*ch < 1500 && *sent) {
 		*sent = 0;
 	}
 }
 
-static void PressOrRelease_Key(struct channel *ch, uint8_t *pressed,
+static void PressOrRelease_Key(channel_t *ch, uint8_t *pressed,
 							   uint8_t keycode)
 {
-	if (ch->width >= 1500) {
+	if (*ch >= 1500) {
 		/* Press a key many times */
 		Send_Key(keycode);
 
 		*pressed = 1;
 
-	} else if (ch->width < 1500 && *pressed) {
+	} else if (*ch < 1500 && *pressed) {
 		/* Release a key once */
 		Send_Key(0x00);
 
@@ -420,6 +459,7 @@ static void Send_KeyboardReport(void)
 static void Status_Blink(void)
 {
 	static uint16_t prev_ms;
+	static int state;
 	static int init;
 
 	uint16_t ms, diff_ms;
@@ -431,25 +471,29 @@ static void Status_Blink(void)
 	ms = __HAL_TIM_GetCounter(&htim2);
 	diff_ms = ms - prev_ms;
 
-	if (input.state == PROBING) {
-		/* 0.2s on, 0.2s off */
+	switch (input.state) {
+	case PROBING:
+		/* short blinks */
 
 		if (diff_ms >= 200) {
 			HAL_GPIO_TogglePin(BP_LED_GPIO_Port, BP_LED_Pin);
 			prev_ms = ms;
 		}
+		break;
 
-	} else if (input.state == PWM_INPUT) {
-		/* 1s on, 1s off */
+	case PWM_INPUT:
+		/* long blinks */
 
 		if (diff_ms >= 1000) {
 			HAL_GPIO_TogglePin(BP_LED_GPIO_Port, BP_LED_Pin);
 			prev_ms = ms;
 		}
-	} else if (input.state == PPM_INPUT) {
-		/* 1s off, 0.2s on, 0.2s off, 0.2s on */
+		break;
 
-		static int state;
+	case PPM_INPUT:
+	case IBUS_INPUT:
+		/* PPM:  2 short blinks */
+		/* IBUS: 3 short blinks */
 
 		if (!state) {
 			/* 1s off */
@@ -460,22 +504,28 @@ static void Status_Blink(void)
 			HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_RESET);
 			prev_ms = ms;
 			state = 2;
-		} else if (state == 2 && diff_ms >= 200) {
+		} else if ((state == 2 || state == 4) && diff_ms >= 200) {
 			/* 0.2s off */
 			HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_SET);
 			prev_ms = ms;
-			state = 3;
-		} else if (state == 3 && diff_ms >= 200) {
+			state += 1;
+		} else if ((state == 3 || state == 5) && diff_ms >= 200) {
 			/* 0.2s on */
 			HAL_GPIO_WritePin(BP_LED_GPIO_Port, BP_LED_Pin, GPIO_PIN_RESET);
 			prev_ms = ms;
-			state = 4;
-		} else if (state == 4 && diff_ms >= 200) {
+
+			if (input.state == PPM_INPUT)
+				state = 6;
+			else
+				state += 1;
+		} else if (state == 6 && diff_ms >= 200) {
 			/* repeat */
 			state = 0;
 			prev_ms = ms;
 		}
-	} else {
+		break;
+
+	default:
 		Error_Handler();
 	}
 }
@@ -522,6 +572,8 @@ int main(void)
 
   if (HAL_TIM_Base_Start_IT(&htim2))
 	  Error_Handler();
+
+  ibus_init(&input.ibus, &huart1);
 
   /* USER CODE END 2 */
 
